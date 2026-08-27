@@ -57,6 +57,16 @@ export default function Bookings() {
                   </View>
                   <Text style={styles.amt}>₹{b.total_amount}</Text>
                 </View>
+                {b.status === 'paid' && (
+                  <Pressable
+                    testID={`rate-${b.booking_id}`}
+                    onPress={(e) => { e.stopPropagation?.(); router.push({ pathname: '/review/[id]', params: { id: b.booking_id } }); }}
+                    style={styles.rateBtn}
+                  >
+                    <Ionicons name="star-outline" size={16} color={colors.brandPrimary} />
+                    <Text style={{ color: colors.brandPrimary, fontWeight: '700' }}>Rate this trip</Text>
+                  </Pressable>
+                )}
               </Card>
             </Pressable>
           ))
@@ -68,7 +78,8 @@ export default function Bookings() {
 
 const styles = StyleSheet.create({
   head: { paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
-  h1: { fontSize: font.xxl, fontWeight: '800', color: colors.onSurface },
-  foot: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: spacing.md, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: colors.divider },
-  amt: { fontSize: font.xl, fontWeight: '800', color: colors.brandPrimary },
+  h1: { fontSize: 24, fontWeight: '800', color: colors.onSurface },
+  foot: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: colors.divider },
+  amt: { fontSize: 20, fontWeight: '800', color: colors.brandPrimary },
+  rateBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 12, paddingVertical: 10, borderRadius: 12, backgroundColor: colors.brandTertiary },
 });

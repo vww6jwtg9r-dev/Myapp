@@ -18,6 +18,7 @@ export default function Profile() {
   ];
 
   const rows = [
+    { icon: 'gift-outline', label: 'Refer & Earn', onPress: () => router.push('/referrals'), show: true },
     { icon: 'car-sport-outline', label: 'My Vehicles', onPress: () => router.push('/driver/register'), show: user?.active_role === 'driver' },
     { icon: 'shield-checkmark-outline', label: 'Admin Dashboard', onPress: () => router.push('/admin'), show: isAdmin && user?.active_role === 'admin' },
     { icon: 'call-outline', label: `Emergency: ${user?.emergency_contact || 'Add contact'}`, onPress: () => router.push('/onboarding'), show: true },

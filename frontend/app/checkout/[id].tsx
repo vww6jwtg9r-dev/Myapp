@@ -13,7 +13,7 @@ type Booking = {
   vehicle?: { model: string; from_location: string; to_location: string; departure_time: string; driver_name: string; };
 };
 
-const METHODS: { key: 'gpay' | 'phonepe' | 'upi'; label: string; icon: any; color: string }[] = [
+const METHODS_MOCK: { key: 'gpay' | 'phonepe' | 'upi'; label: string; icon: any; color: string }[] = [
   { key: 'gpay', label: 'Google Pay', icon: 'logo-google', color: '#4285F4' },
   { key: 'phonepe', label: 'PhonePe', icon: 'phone-portrait', color: '#5F259F' },
   { key: 'upi', label: 'Other UPI', icon: 'card-outline', color: colors.brandPrimary },
@@ -23,20 +23,40 @@ export default function Checkout() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [b, setB] = useState<Booking | null>(null);
   const [loading, setLoading] = useState(true);
-  const [method, setMethod] = useState<'gpay' | 'phonepe' | 'upi'>('gpay');
+  const [rzpEnabled, setRzpEnabled] = useState(false);
+  const [method, setMethod] = useState<'gpay' | 'phonepe' | 'upi' | 'razorpay'>('gpay');
   const [paying, setPaying] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    try { setB(await api<Booking>(`/bookings/${id}`)); } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
+    try {
+      const [bk, cfg] = await Promise.all([
+        api<Booking>(`/bookings/${id}`),
+        api<any>('/config'),
+      ]);
+      setB(bk);
+      setRzpEnabled(!!cfg.razorpay_enabled);
+      if (cfg.razorpay_enabled) setMethod('razorpay');
+    } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
   }, [id]);
   useEffect(() => { load(); }, [load]);
 
   const pay = async () => {
     try {
       setPaying(true); setErr(null);
-      await api(`/bookings/${id}/pay`, { method: 'POST', body: JSON.stringify({ method }) });
-      router.replace({ pathname: '/ticket/[id]', params: { id: id as string } });
+      const res: any = await api(`/bookings/${id}/pay`, { method: 'POST', body: JSON.stringify({ method }) });
+      if (res && res.requires_action === 'razorpay') {
+        router.push({
+          pathname: '/razorpay',
+          params: {
+            order_id: res.order_id, booking_id: res.booking_id, key_id: res.key_id,
+            amount: String(res.amount), currency: res.currency,
+            name: res.prefill?.name || '', email: res.prefill?.email || '', contact: res.prefill?.contact || '',
+          },
+        });
+      } else {
+        router.replace({ pathname: '/ticket/[id]', params: { id: id as string } });
+      }
     } catch (e: any) { setErr(e.message); } finally { setPaying(false); }
   };
 
@@ -74,11 +94,24 @@ export default function Checkout() {
 
         <Card>
           <Text style={styles.section}>Payment Method</Text>
-          <Text style={{ color: colors.muted, marginBottom: spacing.sm, fontSize: font.sm }}>DEMO: mocked UPI payment for prototype.</Text>
-          {METHODS.map(m => (
+          {!rzpEnabled && <Text style={{ color: colors.muted, marginBottom: spacing.sm, fontSize: font.sm }}>DEMO: mocked UPI payment. Add Razorpay keys in backend to enable live checkout.</Text>}
+          {rzpEnabled && (
+            <Pressable testID="pay-razorpay" onPress={() => setMethod('razorpay')} style={[styles.methodRow, method === 'razorpay' && styles.methodActive]}>
+              <View style={[styles.methodIcon, { backgroundColor: '#05A35718' }]}><Ionicons name="shield-checkmark" size={20} color={colors.brandSecondary} /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontWeight: '700', color: colors.onSurface }}>Razorpay (UPI + Cards)</Text>
+                <Text style={{ color: colors.muted, fontSize: font.sm }}>Live secure checkout</Text>
+              </View>
+              <Ionicons name={method === 'razorpay' ? 'radio-button-on' : 'radio-button-off'} size={22} color={method === 'razorpay' ? colors.brandSecondary : colors.borderStrong} />
+            </Pressable>
+          )}
+          {METHODS_MOCK.map(m => (
             <Pressable key={m.key} testID={`pay-${m.key}`} onPress={() => setMethod(m.key)} style={[styles.methodRow, method === m.key && styles.methodActive]}>
               <View style={[styles.methodIcon, { backgroundColor: `${m.color}18` }]}><Ionicons name={m.icon} size={20} color={m.color} /></View>
-              <Text style={{ flex: 1, fontWeight: '600', color: colors.onSurface }}>{m.label}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontWeight: '600', color: colors.onSurface }}>{m.label}</Text>
+                {rzpEnabled && <Text style={{ color: colors.muted, fontSize: font.sm }}>Demo (mock)</Text>}
+              </View>
               <Ionicons name={method === m.key ? 'radio-button-on' : 'radio-button-off'} size={22} color={method === m.key ? colors.brandSecondary : colors.borderStrong} />
             </Pressable>
           ))}

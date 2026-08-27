@@ -1,7 +1,10 @@
 """RideReserve backend - Vehicle Seat Reservation & Ride Sharing Platform."""
 import os
 import uuid
+import hmac
+import hashlib
 import logging
+import secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Literal
@@ -9,11 +12,17 @@ from typing import List, Optional, Literal
 import httpx
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, UploadFile, File, Response, Query
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header, UploadFile, File, Response, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
+
+try:
+    import razorpay  # type: ignore
+except Exception:  # pragma: no cover
+    razorpay = None
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -25,6 +34,11 @@ EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
 APP_NAME = os.environ.get("APP_NAME", "ride-reserve")
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 COMMISSION_RATE = float(os.environ.get("PLATFORM_COMMISSION_RATE", "0.5"))
+REFERRAL_BONUS = float(os.environ.get("REFERRAL_BONUS", "50"))
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "").strip()
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "").strip()
+RAZORPAY_ENABLED = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and razorpay)
+rzp_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) if RAZORPAY_ENABLED else None
 
 STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
 STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
@@ -154,12 +168,29 @@ class Booking(BaseModel):
 
 
 class PayIn(BaseModel):
-    method: Literal["gpay", "phonepe", "upi"] = "gpay"
+    method: Literal["gpay", "phonepe", "upi", "razorpay"] = "gpay"
+
+
+class VerifyPayIn(BaseModel):
+    booking_id: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
 
 
 class WithdrawIn(BaseModel):
     amount: float
     upi_id: str
+
+
+class ReviewIn(BaseModel):
+    booking_id: str
+    stars: int = Field(ge=1, le=5)
+    comment: Optional[str] = None
+
+
+class ApplyReferralIn(BaseModel):
+    code: str
 
 
 # ---------- Utils ----------
@@ -210,6 +241,7 @@ async def upsert_user(email: Optional[str], phone: Optional[str], name: str, pic
         return existing
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     is_admin = bool(email and email.lower() in ADMIN_EMAILS)
+    ref_code = _make_ref_code()
     doc = {
         "user_id": user_id,
         "email": email.lower() if email else None,
@@ -220,10 +252,17 @@ async def upsert_user(email: Optional[str], phone: Optional[str], name: str, pic
         "active_role": "admin" if is_admin else "passenger",
         "is_admin": is_admin,
         "wallet_balance": 0.0,
+        "referral_code": ref_code,
+        "referred_by": None,
+        "referral_paid": False,
         "created_at": now_utc(),
     }
     await db.users.insert_one(doc)
     return scrub(doc)
+
+
+def _make_ref_code() -> str:
+    return "RR" + secrets.token_hex(3).upper()
 
 
 async def create_session(user_id: str) -> str:
@@ -463,21 +502,19 @@ async def create_booking(payload: BookingCreateIn, user=Depends(get_current_user
     return scrub(doc)
 
 
-@api.post("/bookings/{booking_id}/pay")
-async def pay_booking(booking_id: str, payload: PayIn, user=Depends(get_current_user)):
+async def _fulfill_paid_booking(booking_id: str, payment_method: str) -> dict:
+    """Mark booking paid, credit driver 50%, record platform commission, apply referral bonus on referee's first paid booking."""
     b = await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
-    if not b or b["passenger_id"] != user["user_id"]:
+    if not b:
         raise HTTPException(status_code=404, detail="Booking not found")
     if b["status"] == "paid":
         return b
 
-    # MOCKED UPI/GPay/PhonePe payment
     await db.bookings.update_one(
         {"booking_id": booking_id},
-        {"$set": {"status": "paid", "payment_method": payload.method, "paid_at": now_utc()}},
+        {"$set": {"status": "paid", "payment_method": payment_method, "paid_at": now_utc()}},
     )
 
-    # Credit driver wallet & record transactions
     v = await db.vehicles.find_one({"vehicle_id": b["vehicle_id"]}, {"_id": 0})
     if v:
         await db.users.update_one(
@@ -502,8 +539,70 @@ async def pay_booking(booking_id: str, payload: PayIn, user=Depends(get_current_
             "created_at": now_utc(),
         })
 
-    updated = await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
-    return updated
+    # Referral bonus on first paid booking
+    passenger = await db.users.find_one({"user_id": b["passenger_id"]}, {"_id": 0})
+    if passenger and passenger.get("referred_by") and not passenger.get("referral_paid"):
+        referrer_code = passenger["referred_by"]
+        referrer = await db.users.find_one({"referral_code": referrer_code}, {"_id": 0})
+        if referrer:
+            bonus = REFERRAL_BONUS
+            await db.users.update_one({"user_id": referrer["user_id"]}, {"$inc": {"wallet_balance": bonus}})
+            await db.users.update_one({"user_id": passenger["user_id"]}, {"$inc": {"wallet_balance": bonus}, "$set": {"referral_paid": True}})
+            await db.transactions.insert_many([
+                {"txn_id": f"tx_{uuid.uuid4().hex[:12]}", "user_id": referrer["user_id"], "type": "credit", "amount": bonus, "note": f"Referral bonus for {passenger['name']}", "created_at": now_utc()},
+                {"txn_id": f"tx_{uuid.uuid4().hex[:12]}", "user_id": passenger["user_id"], "type": "credit", "amount": bonus, "note": f"Welcome bonus (referred by {referrer['name']})", "created_at": now_utc()},
+            ])
+
+    return await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
+
+
+@api.post("/bookings/{booking_id}/pay")
+async def pay_booking(booking_id: str, payload: PayIn, user=Depends(get_current_user)):
+    b = await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
+    if not b or b["passenger_id"] != user["user_id"]:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if b["status"] == "paid":
+        return b
+
+    # Razorpay flow: create order and return checkout config; client must call /verify after payment
+    if payload.method == "razorpay" and RAZORPAY_ENABLED:
+        try:
+            order = await run_in_threadpool(
+                rzp_client.order.create,
+                {"amount": int(b["total_amount"] * 100), "currency": "INR", "receipt": booking_id, "notes": {"booking_id": booking_id, "user_id": user["user_id"]}},
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Razorpay error: {e}")
+        await db.bookings.update_one({"booking_id": booking_id}, {"$set": {"razorpay_order_id": order["id"]}})
+        return {
+            "requires_action": "razorpay",
+            "key_id": RAZORPAY_KEY_ID,
+            "order_id": order["id"],
+            "amount": int(b["total_amount"] * 100),
+            "currency": "INR",
+            "booking_id": booking_id,
+            "prefill": {"name": user["name"], "email": user.get("email") or "", "contact": user.get("phone") or ""},
+        }
+
+    # Mock flow (GPay/PhonePe/UPI)
+    return await _fulfill_paid_booking(booking_id, payload.method)
+
+
+@api.post("/bookings/verify-payment")
+async def verify_razorpay_payment(payload: VerifyPayIn, user=Depends(get_current_user)):
+    if not RAZORPAY_ENABLED:
+        raise HTTPException(status_code=400, detail="Razorpay not configured")
+    b = await db.bookings.find_one({"booking_id": payload.booking_id}, {"_id": 0})
+    if not b or b["passenger_id"] != user["user_id"]:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    expected = hmac.new(
+        RAZORPAY_KEY_SECRET.encode(),
+        f"{payload.razorpay_order_id}|{payload.razorpay_payment_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, payload.razorpay_signature):
+        raise HTTPException(status_code=400, detail="Invalid payment signature")
+    return await _fulfill_paid_booking(payload.booking_id, "razorpay")
 
 
 @api.get("/bookings/mine")
@@ -639,9 +738,140 @@ async def admin_commissions(user=Depends(require_admin)):
     return await db.transactions.find({"user_id": "PLATFORM"}, {"_id": 0}).sort("created_at", -1).to_list(300)
 
 
+# ---------- Reviews ----------
+async def _recompute_vehicle_rating(vehicle_id: str) -> None:
+    pipeline = [
+        {"$match": {"vehicle_id": vehicle_id}},
+        {"$group": {"_id": None, "avg": {"$avg": "$stars"}, "count": {"$sum": 1}}},
+    ]
+    agg = await db.reviews.aggregate(pipeline).to_list(1)
+    if agg:
+        await db.vehicles.update_one(
+            {"vehicle_id": vehicle_id},
+            {"$set": {"rating": round(agg[0]["avg"], 2), "review_count": agg[0]["count"]}},
+        )
+
+
+@api.post("/reviews")
+async def create_review(payload: ReviewIn, user=Depends(get_current_user)):
+    b = await db.bookings.find_one({"booking_id": payload.booking_id}, {"_id": 0})
+    if not b or b["passenger_id"] != user["user_id"]:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if b["status"] != "paid":
+        raise HTTPException(status_code=400, detail="Can only rate paid bookings")
+    existing = await db.reviews.find_one({"booking_id": payload.booking_id}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=409, detail="Already reviewed")
+    doc = {
+        "review_id": f"rv_{uuid.uuid4().hex[:12]}",
+        "booking_id": payload.booking_id,
+        "vehicle_id": b["vehicle_id"],
+        "passenger_id": user["user_id"],
+        "passenger_name": user["name"],
+        "stars": payload.stars,
+        "comment": (payload.comment or "").strip(),
+        "created_at": now_utc(),
+    }
+    await db.reviews.insert_one(doc)
+    await _recompute_vehicle_rating(b["vehicle_id"])
+    return scrub(doc)
+
+
+@api.get("/reviews/vehicle/{vehicle_id}")
+async def list_vehicle_reviews(vehicle_id: str):
+    items = await db.reviews.find({"vehicle_id": vehicle_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    return items
+
+
+@api.get("/reviews/mine")
+async def my_reviews(user=Depends(get_current_user)):
+    items = await db.reviews.find({"passenger_id": user["user_id"]}, {"_id": 0}).to_list(200)
+    return items
+
+
+# ---------- Referrals ----------
+@api.get("/referrals/me")
+async def my_referral(user=Depends(get_current_user)):
+    fresh = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if not fresh:
+        raise HTTPException(status_code=404, detail="not found")
+    if not fresh.get("referral_code"):
+        code = _make_ref_code()
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"referral_code": code}})
+        fresh["referral_code"] = code
+    invited = await db.users.count_documents({"referred_by": fresh["referral_code"]})
+    earned = 0.0
+    async for t in db.transactions.find({"user_id": user["user_id"], "note": {"$regex": "^Referral bonus"}}, {"_id": 0, "amount": 1}):
+        earned += float(t.get("amount", 0))
+    return {
+        "referral_code": fresh["referral_code"],
+        "referred_by": fresh.get("referred_by"),
+        "invited": invited,
+        "earned": earned,
+        "bonus": REFERRAL_BONUS,
+    }
+
+
+@api.post("/referrals/apply")
+async def apply_referral(payload: ApplyReferralIn, user=Depends(get_current_user)):
+    fresh = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    if not fresh:
+        raise HTTPException(status_code=404, detail="not found")
+    if fresh.get("referred_by"):
+        raise HTTPException(status_code=409, detail="Referral already applied")
+    code = payload.code.strip().upper()
+    if code == fresh.get("referral_code"):
+        raise HTTPException(status_code=400, detail="Cannot use your own code")
+    referrer = await db.users.find_one({"referral_code": code}, {"_id": 0})
+    if not referrer:
+        raise HTTPException(status_code=404, detail="Invalid code")
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"referred_by": code}})
+    return {"ok": True, "message": f"Applied. You + {referrer['name']} earn ₹{REFERRAL_BONUS:.0f} after your first paid ride."}
+
+
+# ---------- Config (public) ----------
+@api.get("/config")
+async def config():
+    return {
+        "razorpay_enabled": RAZORPAY_ENABLED,
+        "razorpay_key_id": RAZORPAY_KEY_ID if RAZORPAY_ENABLED else None,
+        "referral_bonus": REFERRAL_BONUS,
+    }
+
+
+# ---------- Geocoding for map preview ----------
+# Static coords for common Indian cities. Extensible; falls back to Nominatim if configured later.
+CITY_COORDS = {
+    "bangalore": (12.9716, 77.5946), "bengaluru": (12.9716, 77.5946),
+    "mysore": (12.2958, 76.6394), "mysuru": (12.2958, 76.6394),
+    "chennai": (13.0827, 80.2707), "coorg": (12.3375, 75.8069), "madikeri": (12.4244, 75.7382),
+    "mumbai": (19.0760, 72.8777), "pune": (18.5204, 73.8567), "delhi": (28.6139, 77.2090),
+    "new delhi": (28.6139, 77.2090), "hyderabad": (17.3850, 78.4867),
+    "kolkata": (22.5726, 88.3639), "ahmedabad": (23.0225, 72.5714),
+    "goa": (15.2993, 74.1240), "panaji": (15.4909, 73.8278),
+    "jaipur": (26.9124, 75.7873), "lucknow": (26.8467, 80.9462),
+    "kochi": (9.9312, 76.2673), "kozhikode": (11.2588, 75.7804), "thiruvananthapuram": (8.5241, 76.9366),
+    "manipal": (13.3467, 74.7869), "udupi": (13.3409, 74.7421), "mangalore": (12.9141, 74.856),
+    "chikmagalur": (13.3161, 75.7720), "hampi": (15.3350, 76.4600), "ooty": (11.4064, 76.6932),
+}
+
+
+@api.get("/geocode")
+async def geocode(q: str = Query(...)):
+    key = q.strip().lower()
+    if key in CITY_COORDS:
+        lat, lon = CITY_COORDS[key]
+        return {"query": q, "lat": lat, "lon": lon, "source": "static"}
+    # fuzzy contains
+    for city, (lat, lon) in CITY_COORDS.items():
+        if city in key or key in city:
+            return {"query": q, "lat": lat, "lon": lon, "source": "fuzzy"}
+    raise HTTPException(status_code=404, detail="Unknown city. Try Bangalore, Mysore, Chennai, Coorg, Mumbai, Delhi, etc.")
+
+
 @api.get("/")
 async def root():
-    return {"service": "RideReserve API", "version": "1.0"}
+    return {"service": "RideReserve API", "version": "1.1"}
 
 
 app.include_router(api)
@@ -664,6 +894,9 @@ async def seed():
     await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
     await db.vehicles.create_index("vehicle_id", unique=True)
     await db.bookings.create_index("booking_id", unique=True)
+    await db.reviews.create_index("booking_id", unique=True)
+    await db.reviews.create_index("vehicle_id")
+    await db.users.create_index("referral_code", sparse=True)
 
     # Seed admin
     admin_email = "admin@ridereserve.app"

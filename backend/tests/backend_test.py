@@ -10,7 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://mobility-reserve-3.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = os.environ.get("DB_NAME", "test_database")
+DB_NAME = os.environ.get("DB_NAME", "ride_reserve_db")
 
 
 # ---------- Fixtures ----------
@@ -45,19 +45,16 @@ def driver_auth(s):
 
 @pytest.fixture(scope="session")
 def admin_auth(s):
-    """Promote a new phone user to admin via Mongo direct write."""
-    import asyncio
+    """Promote a new phone user to admin via direct Mongo write (sync pymongo)."""
+    from pymongo import MongoClient
     phone = f"+9199{uuid.uuid4().hex[:8]}"
     r = s.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": "123456", "name": "TEST Admin"})
     data = r.json()
     token = data["session_token"]
     uid = data["user"]["user_id"]
-
-    async def promote():
-        c = AsyncIOMotorClient(MONGO_URL)
-        await c[DB_NAME].users.update_one({"user_id": uid}, {"$set": {"is_admin": True, "active_role": "admin"}})
-        c.close()
-    asyncio.get_event_loop().run_until_complete(promote())
+    c = MongoClient(MONGO_URL)
+    c[DB_NAME].users.update_one({"user_id": uid}, {"$set": {"is_admin": True, "active_role": "admin"}})
+    c.close()
     return {"token": token, "user_id": uid}
 
 
@@ -158,8 +155,16 @@ class TestVehicles:
 class TestBookings:
     def test_create_pay_and_persist(self, s, passenger_auth):
         travel_date = (date.today() + timedelta(days=5)).isoformat()
-        payload = {"vehicle_id": "veh_demo_car_01", "travel_date": travel_date, "seat_numbers": [1, 2]}
+        # Use unique seats to avoid collisions on repeated DB runs
+        seats = [(int(uuid.uuid4().int) % 3) + 1, ((int(uuid.uuid4().int) % 3) + 1) + 3]
+        seats = list({seats[0], seats[0] + 1})[:2] if len(set(seats)) < 2 else seats
+        payload = {"vehicle_id": "veh_demo_car_01", "travel_date": travel_date, "seat_numbers": seats}
         r = s.post(f"{API}/bookings", json=payload, headers=auth_h(passenger_auth["token"]))
+        if r.status_code == 409:
+            # fresh unique date
+            travel_date = (date.today() + timedelta(days=365 + (int(uuid.uuid4().int) % 500))).isoformat()
+            payload["travel_date"] = travel_date
+            r = s.post(f"{API}/bookings", json=payload, headers=auth_h(passenger_auth["token"]))
         assert r.status_code == 200, r.text
         b = r.json()
         assert b["total_amount"] == 450 * 2
@@ -183,8 +188,9 @@ class TestBookings:
         assert rg2.json()["vehicle"]["driver_phone"] is not None
 
     def test_seat_conflict(self, s, passenger_auth):
-        travel_date = (date.today() + timedelta(days=6)).isoformat()
-        p = {"vehicle_id": "veh_demo_bus_01", "travel_date": travel_date, "seat_numbers": [5]}
+        travel_date = (date.today() + timedelta(days=800 + (int(uuid.uuid4().int) % 500))).isoformat()
+        seat = (int(uuid.uuid4().int) % 30) + 1
+        p = {"vehicle_id": "veh_demo_bus_01", "travel_date": travel_date, "seat_numbers": [seat]}
         r1 = s.post(f"{API}/bookings", json=p, headers=auth_h(passenger_auth["token"]))
         assert r1.status_code == 200
         bid = r1.json()["booking_id"]

@@ -1,0 +1,42 @@
+{
+  "summary": "Backend-only regression + new-feature testing for RideReserve follow-up features (config, geocode, reviews, referrals, Razorpay fallback). Added /app/backend/tests/test_new_features.py with 15 tests; hardened /app/backend/tests/backend_test.py flake fixes (DB_NAME default, async->sync pymongo promotion, unique seat/date to eliminate re-run collisions). Full suite: 37/37 pass (22 regression + 15 new). Verified: /api/config returns razorpay_enabled=false + referral_bonus=50; /api/geocode returns coords for known cities (Bangalore/Mysore case-insensitive) and 404 for unknown; /api/reviews creates reviews only for owner+paid bookings, blocks duplicates (409), blocks non-paid bookings (400), and recomputes vehicle avg rating; /api/reviews/vehicle/{id} and /api/reviews/mine list correctly; /api/referrals/me returns auto-generated RR-prefixed code + bonus=50; apply-own-code=400, invalid=404, twice=409; referral bonus flow verified end-to-end: A gets +₹50, B gets +₹50 on B's first paid booking, referral_paid flips, 2nd paid booking does NOT double-credit; Razorpay: with blank keys POST /bookings/{id}/pay method='razorpay' falls back to mock and fulfills booking (status=paid); /bookings/verify-payment correctly returns 400 'not configured'; gpay path still works.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_new_features.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/pytest_new_features.xml"
+  ],
+  "action_items": [
+    "No blockers. Optional: consider using dedicated test DB or per-test cleanup to further isolate tests from seeded/production data."
+  ],
+  "critical_code_review_comments": [
+    "server.py Razorpay branch: when method=='razorpay' but RAZORPAY_ENABLED is False, code silently falls through to mock fulfillment (line 568-585). This matches spec ('graceful fallback') but the client cannot distinguish an intended-real vs fell-back-to-mock payment. Consider returning a flag like {mocked:true} in the response so the app can toast a hint.",
+    "/api/referrals/me computes `earned` by regexing transaction notes ('^Referral bonus'). Works today, but coupling to note text is fragile — prefer a dedicated `type: 'referral_bonus'` on transactions.",
+    "/api/reviews accepts stars via Pydantic Field(ge=1, le=5) — good validation.",
+    "Duplicate-review guard uses unique index on booking_id (seed()) AND explicit find_one check → 409 works.",
+    "_fulfill_paid_booking is idempotent (returns immediately if already paid) — good, prevents double credit on retries.",
+    "referral_paid is set atomically with $inc on same update_one — good.",
+    "Verify-payment: signature check uses hmac.compare_digest — correct constant-time compare.",
+    "server.py is now 1010 lines; consider splitting into routers (auth/vehicles/bookings/wallet/admin/reviews/referrals/geocode) as it continues to grow."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_new_features.py (new)",
+    "/app/backend/tests/backend_test.py (DB_NAME default, sync pymongo promotion, unique seats/dates)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "not tested (skipped per request)"},
+  "seed_data_creation": "None persistent. Test users prefixed 'TEST '. Uses seeded vehicles (veh_demo_car_01/tempo_01/bus_01) and demo driver +919000000001.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend DB is 'ride_reserve_db' on mongodb://localhost:27017 (protected env). Public API base: EXPO_PUBLIC_BACKEND_URL. Phone OTP mocked (code=123456). Razorpay keys intentionally blank -> RAZORPAY_ENABLED=false -> method='razorpay' falls back to mock; /api/bookings/verify-payment returns 400. Referral: user gets RR-hex code on signup, apply once, credit on first-paid-booking only (both sides +₹50), transactions recorded with note 'Referral bonus'/'Welcome bonus'. Reviews unique per booking (409 on duplicate); vehicle rating recomputed as running avg on write.",
+  "rca_of_issue": "N/A - all 4 new features working end-to-end. Prior iteration flakes were purely test-hygiene (hardcoded seats colliding on 2nd run + wrong DB_NAME default + asyncio.get_event_loop deprecation on py3.11). Fixed in test files."
+}

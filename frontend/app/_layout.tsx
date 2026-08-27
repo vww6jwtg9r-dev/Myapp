@@ -42,6 +42,9 @@ export default function RootLayout() {
             <Stack.Screen name="vehicle/[id]" />
             <Stack.Screen name="checkout/[id]" />
             <Stack.Screen name="ticket/[id]" />
+            <Stack.Screen name="review/[id]" />
+            <Stack.Screen name="razorpay" />
+            <Stack.Screen name="referrals" />
             <Stack.Screen name="driver/register" />
             <Stack.Screen name="admin/index" />
           </Stack>

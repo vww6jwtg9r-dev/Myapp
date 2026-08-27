@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '@/src/api';
 import { Card, Button, Badge } from '@/src/ui';
+import { RouteMap } from '@/src/RouteMap';
 import { colors, spacing, font, radius } from '@/src/theme';
 
 type Vehicle = {
@@ -13,6 +14,7 @@ type Vehicle = {
   total_seats: number; from_location: string; to_location: string; fare_per_seat: number; departure_time: string;
 };
 type Seats = { total_seats: number; booked_seats: number[]; vehicle_type: string };
+type Coord = { lat: number; lon: number };
 
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 
@@ -31,6 +33,8 @@ export default function VehicleDetail() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reviews, setReviews] = useState<any[]>([]);
+  const [coords, setCoords] = useState<{ from?: Coord; to?: Coord }>({});
 
   const load = useCallback(async () => {
     try {
@@ -39,6 +43,12 @@ export default function VehicleDetail() {
         api<Seats>(`/vehicles/${params.id}/seats?travel_date=${encodeURIComponent(date)}`),
       ]);
       setV(vv); setSeats(ss);
+      // fetch reviews + coords in parallel (best-effort)
+      api<any[]>(`/reviews/vehicle/${params.id}`).then(setReviews).catch(() => {});
+      Promise.all([
+        api<Coord>(`/geocode?q=${encodeURIComponent(vv.from_location)}`).catch(() => null),
+        api<Coord>(`/geocode?q=${encodeURIComponent(vv.to_location)}`).catch(() => null),
+      ]).then(([a, b]) => setCoords({ from: a || undefined, to: b || undefined }));
     } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
   }, [params.id, date]);
 
@@ -94,6 +104,18 @@ export default function VehicleDetail() {
           </View>
         </Card>
 
+        {coords.from && coords.to && (
+          <Card style={{ padding: 0, overflow: 'hidden' }}>
+            <View style={{ padding: spacing.md, paddingBottom: 0 }}>
+              <Text style={styles.section}>Route Preview</Text>
+            </View>
+            <RouteMap
+              from={{ lat: coords.from.lat, lon: coords.from.lon, label: v.from_location }}
+              to={{ lat: coords.to.lat, lon: coords.to.lon, label: v.to_location }}
+            />
+          </Card>
+        )}
+
         <Card>
           <Text style={styles.section}>Choose your seats</Text>
           <View style={styles.legend}>
@@ -129,6 +151,25 @@ export default function VehicleDetail() {
             })}
           </View>
         </Card>
+
+        {reviews.length > 0 && (
+          <Card>
+            <Text style={styles.section}>Reviews ({reviews.length})</Text>
+            {reviews.slice(0, 5).map(r => (
+              <View key={r.review_id} style={{ paddingVertical: spacing.sm, borderTopWidth: 1, borderTopColor: colors.divider }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={{ fontWeight: '700', color: colors.onSurface }}>{r.passenger_name}</Text>
+                  <View style={{ flexDirection: 'row', gap: 2 }}>
+                    {Array.from({ length: 5 }).map((_, i) => (
+                      <Ionicons key={i} name={i < r.stars ? 'star' : 'star-outline'} size={12} color={colors.warning} />
+                    ))}
+                  </View>
+                </View>
+                {r.comment ? <Text style={{ color: colors.onSurfaceSecondary, marginTop: 4 }}>{r.comment}</Text> : null}
+              </View>
+            ))}
+          </Card>
+        )}
 
         {err && <Text style={{ color: colors.error }}>{err}</Text>}
       </ScrollView>
