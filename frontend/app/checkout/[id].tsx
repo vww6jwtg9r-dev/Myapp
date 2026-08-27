@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, ScrollView, ActivityIndicator, Pressable } from
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api } from '@/src/api';
+import { api, getConfig } from '@/src/api';
 import { Card, Button } from '@/src/ui';
 import { colors, spacing, font, radius } from '@/src/theme';
 
@@ -32,7 +32,7 @@ export default function Checkout() {
     try {
       const [bk, cfg] = await Promise.all([
         api<Booking>(`/bookings/${id}`),
-        api<any>('/config'),
+        getConfig<any>(),
       ]);
       setB(bk);
       setRzpEnabled(!!cfg.razorpay_enabled);

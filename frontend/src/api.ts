@@ -70,3 +70,10 @@ export function fileUrl(pathOrUrl: string | null | undefined): string | undefine
   if (pathOrUrl.startsWith('/api/')) return `${BACKEND_URL}${pathOrUrl}`;
   return `${BACKEND_URL}/api/files/${pathOrUrl}`;
 }
+
+let _configCache: any | null = null;
+export async function getConfig<T = any>(): Promise<T> {
+  if (_configCache) return _configCache as T;
+  _configCache = await api('/config');
+  return _configCache as T;
+}

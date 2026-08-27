@@ -12,6 +12,7 @@ type Vehicle = {
   vehicle_id: string; vehicle_type: 'car' | 'tempo' | 'bus';
   model: string; number_plate: string; driver_name: string; rating: number;
   total_seats: number; from_location: string; to_location: string; fare_per_seat: number; departure_time: string;
+  driver_verified?: boolean;
 };
 type Seats = { total_seats: number; booked_seats: number[]; vehicle_type: string };
 type Coord = { lat: number; lon: number };
@@ -88,7 +89,15 @@ export default function VehicleDetail() {
 
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md, paddingBottom: 200 }}>
         <Card>
-          <Text style={{ fontSize: font.xl, fontWeight: '800', color: colors.onSurface }}>{v.model}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <Text style={{ fontSize: font.xl, fontWeight: '800', color: colors.onSurface }}>{v.model}</Text>
+            {v.driver_verified && (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: `${colors.brandSecondary}18`, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10 }}>
+                <Ionicons name="shield-checkmark" size={14} color={colors.brandSecondary} />
+                <Text style={{ fontSize: font.sm, fontWeight: '800', color: colors.brandSecondary }}>Verified</Text>
+              </View>
+            )}
+          </View>
           <Text style={{ color: colors.muted, marginTop: 2 }}>{v.driver_name} · {v.number_plate}</Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginTop: spacing.sm }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>

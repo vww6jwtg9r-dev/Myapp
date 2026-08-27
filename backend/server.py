@@ -415,14 +415,17 @@ async def search_vehicles(
     if vehicle_type and vehicle_type != "all":
         q["vehicle_type"] = vehicle_type
     items = await db.vehicles.find(q, {"_id": 0}).to_list(200)
-    if travel_date:
+    if travel_date and items:
+        vids = [v["vehicle_id"] for v in items]
+        # Single batched query instead of N+1
+        pipeline = [
+            {"$match": {"vehicle_id": {"$in": vids}, "travel_date": travel_date, "status": "paid"}},
+            {"$unwind": "$seat_numbers"},
+            {"$group": {"_id": "$vehicle_id", "taken": {"$sum": 1}}},
+        ]
+        taken_map = {r["_id"]: r["taken"] async for r in db.bookings.aggregate(pipeline)}
         for v in items:
-            booked = await db.bookings.find(
-                {"vehicle_id": v["vehicle_id"], "travel_date": travel_date, "status": "paid"},
-                {"_id": 0, "seat_numbers": 1},
-            ).to_list(500)
-            taken = sum(len(b["seat_numbers"]) for b in booked)
-            v["seats_available"] = max(0, v["total_seats"] - taken)
+            v["seats_available"] = max(0, v["total_seats"] - taken_map.get(v["vehicle_id"], 0))
     else:
         for v in items:
             v["seats_available"] = v["total_seats"]
@@ -608,9 +611,12 @@ async def verify_razorpay_payment(payload: VerifyPayIn, user=Depends(get_current
 @api.get("/bookings/mine")
 async def my_bookings(user=Depends(get_current_user)):
     items = await db.bookings.find({"passenger_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
-    # Enrich with vehicle info
+    if not items:
+        return items
+    vids = list({b["vehicle_id"] for b in items})
+    vmap = {v["vehicle_id"]: v async for v in db.vehicles.find({"vehicle_id": {"$in": vids}}, {"_id": 0})}
     for b in items:
-        v = await db.vehicles.find_one({"vehicle_id": b["vehicle_id"]}, {"_id": 0})
+        v = vmap.get(b["vehicle_id"])
         if v:
             b["vehicle"] = {
                 "model": v["model"],
@@ -649,19 +655,47 @@ async def get_booking(booking_id: str, user=Depends(get_current_user)):
 
 @api.get("/bookings/driver/list")
 async def driver_bookings(user=Depends(get_current_user)):
-    my_veh = await db.vehicles.find({"driver_id": user["user_id"]}, {"_id": 0, "vehicle_id": 1}).to_list(200)
-    ids = [v["vehicle_id"] for v in my_veh]
-    if not ids:
+    my_veh = await db.vehicles.find({"driver_id": user["user_id"]}, {"_id": 0}).to_list(200)
+    if not my_veh:
         return []
+    vmap = {v["vehicle_id"]: v for v in my_veh}
     items = await db.bookings.find(
-        {"vehicle_id": {"$in": ids}, "status": "paid"}, {"_id": 0}
+        {"vehicle_id": {"$in": list(vmap.keys())}, "status": "paid"}, {"_id": 0}
     ).sort("travel_date", 1).to_list(500)
     for b in items:
-        v = await db.vehicles.find_one({"vehicle_id": b["vehicle_id"]}, {"_id": 0})
+        v = vmap.get(b["vehicle_id"])
         if v:
             b["vehicle_model"] = v["model"]
             b["route"] = f"{v['from_location']} → {v['to_location']}"
     return items
+
+
+@api.post("/bookings/{booking_id}/cancel")
+async def cancel_booking(booking_id: str, user=Depends(get_current_user)):
+    b = await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
+    if not b or b["passenger_id"] != user["user_id"]:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if b["status"] == "cancelled":
+        return b
+    if b["status"] == "paid":
+        # Refund: reverse driver credit + platform commission (simplified: full refund from wallets)
+        v = await db.vehicles.find_one({"vehicle_id": b["vehicle_id"]}, {"_id": 0})
+        if v:
+            await db.users.update_one({"user_id": v["driver_id"]}, {"$inc": {"wallet_balance": -b["driver_earning"]}})
+            await db.transactions.insert_one({
+                "txn_id": f"tx_{uuid.uuid4().hex[:12]}",
+                "user_id": v["driver_id"],
+                "booking_id": booking_id,
+                "type": "debit",
+                "amount": b["driver_earning"],
+                "note": f"Refund for cancelled booking {booking_id}",
+                "created_at": now_utc(),
+            })
+    await db.bookings.update_one(
+        {"booking_id": booking_id},
+        {"$set": {"status": "cancelled", "cancelled_at": now_utc()}},
+    )
+    return await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
 
 
 # ---------- Wallet ----------
@@ -752,6 +786,23 @@ async def _recompute_vehicle_rating(vehicle_id: str) -> None:
         )
 
 
+async def _recompute_driver_verification(driver_id: str) -> None:
+    """A driver becomes 'verified' after receiving 5+ five-star reviews across all their vehicles."""
+    my_vids = await db.vehicles.distinct("vehicle_id", {"driver_id": driver_id})
+    if not my_vids:
+        return
+    count = await db.reviews.count_documents({"vehicle_id": {"$in": my_vids}, "stars": 5})
+    is_verified = count >= 5
+    await db.vehicles.update_many(
+        {"driver_id": driver_id},
+        {"$set": {"driver_verified": is_verified, "driver_five_star_count": count}},
+    )
+    await db.users.update_one(
+        {"user_id": driver_id},
+        {"$set": {"driver_verified": is_verified, "driver_five_star_count": count}},
+    )
+
+
 @api.post("/reviews")
 async def create_review(payload: ReviewIn, user=Depends(get_current_user)):
     b = await db.bookings.find_one({"booking_id": payload.booking_id}, {"_id": 0})
@@ -774,6 +825,9 @@ async def create_review(payload: ReviewIn, user=Depends(get_current_user)):
     }
     await db.reviews.insert_one(doc)
     await _recompute_vehicle_rating(b["vehicle_id"])
+    v = await db.vehicles.find_one({"vehicle_id": b["vehicle_id"]}, {"_id": 0, "driver_id": 1})
+    if v:
+        await _recompute_driver_verification(v["driver_id"])
     return scrub(doc)
 
 

@@ -1,48 +1,35 @@
 # RideReserve — Product Requirements
 
-Mobile-first Vehicle Seat Reservation & Ride Sharing platform (Cars, Tempos, Buses) with dual roles (Passenger / Driver / Admin), 50/50 commission split, QR ticketing, ratings, referrals, and route maps.
+Mobile-first Vehicle Seat Reservation & Ride Sharing platform (Cars, Tempos, Buses) with dual roles, 50/50 commission split, QR ticketing, ratings, referrals, verified drivers, trip reminders, and route maps.
 
 ## Tech
 - Expo Router SDK 54, TypeScript, safe-area-context, expo-image-picker, react-native-qrcode-svg, react-native-webview, Leaflet + OpenStreetMap
 - FastAPI + MongoDB (motor), razorpay SDK
 - Auth: Emergent Managed Google + Phone OTP (mocked — OTP = `123456`)
 - Uploads: Emergent Managed Object Storage
-- Payments: Razorpay (test mode, live UPI + cards) with mocked GPay/PhonePe fallback
+- Payments: Razorpay (test mode) with mocked GPay/PhonePe fallback
 
-## Core Screens
-1. Login (Google + Phone OTP)
-2. Onboarding (name, photo, emergency contact)
-3. Home/Search (from, to, date, type pills)
-4. Vehicle Detail: **Route Preview map (OSM/Leaflet)**, seat grid, reviews list
-5. Checkout with Razorpay + mocked GPay/PhonePe/UPI methods
-6. Razorpay WebView checkout screen
-7. Digital Ticket (QR + Call Driver post-payment)
-8. My Bookings + **"Rate this Trip" button** on paid rides
-9. Rate Trip: 1–5 stars + optional comment
-10. Wallet/Earnings + Withdraw
-11. Profile with role switch + **Refer & Earn link**
-12. Refer & Earn: share code, apply friend's code
-13. Driver: Vehicle Registration + Listing
-14. Admin: Revenue, Approvals, Drivers
+## Feature Set (latest)
+- Login + Onboarding, Home search + filter chips
+- Vehicle detail with **Route Preview (OSM)** + **Verified Driver shield** + Reviews list
+- Interactive seat grid (Car 4 / Tempo 12 / Bus 32)
+- Checkout: Razorpay WebView OR mocked GPay/PhonePe/UPI
+- Digital QR ticket + Call Driver
+- **My Bookings with Upcoming/Completed/Cancelled tabs, per-status counters, Pay Now for pending, Cancel with refund**
+- **In-app Trip Reminder banner on Home when a paid ride is < 60 min from departure**
+- Rate trip (1–5 stars + optional comment) — auto-updates avg rating and driver verified badge
+- Refer & Earn: `RR-XXXXXX` code, share sheet, apply code, ₹50 to each after referee's first paid ride
+- Wallet/Earnings + UPI withdraw
+- Profile with role switch (Passenger / Driver / Admin)
+- Driver: Register vehicle + list; Admin: revenue, approvals
 
-## Key APIs
-Auth: `/api/auth/session`, `/api/auth/otp/send|verify`, `/api/auth/me`
-Users: `/api/users/me`, `/api/upload`, `/api/files/{path}`
-Vehicles: `/api/vehicles`, `/api/vehicles/mine`, `/api/vehicles/search`, `/api/vehicles/{id}`, `/api/vehicles/{id}/seats`
-Bookings: `/api/bookings`, `/api/bookings/{id}/pay`, `/api/bookings/verify-payment`, `/api/bookings/mine`, `/api/bookings/driver/list`, `/api/bookings/{id}`
-Wallet: `/api/wallet/me`, `/api/wallet/withdraw`
-Reviews: `/api/reviews`, `/api/reviews/vehicle/{id}`, `/api/reviews/mine`
-Referrals: `/api/referrals/me`, `/api/referrals/apply`
-Geo: `/api/geocode?q=...`
-Config: `/api/config`
-Admin: `/api/admin/stats`, `/api/admin/vehicles/*`, `/api/admin/commissions`
+## Performance
+- `/vehicles/search` uses a single aggregation for seat availability (was N+1)
+- `/bookings/mine` and `/bookings/driver/list` batch vehicle lookups
+- `/config` cached in-memory on client
+- Search results < 10 ms server-side
 
 ## Feature Flags (env)
-- `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` — leave blank to fall back to mocked payment; add for live Razorpay UPI/Cards
-- `REFERRAL_BONUS` = 50 (₹ per referrer + referee)
+- `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` — blank falls back to mock; add for live UPI/Cards
+- `REFERRAL_BONUS` = 50
 - `PLATFORM_COMMISSION_RATE` = 0.5
-
-## How to enable live Razorpay (later)
-1. Go to dashboard.razorpay.com → Test Mode → Account Settings → API Keys → Generate.
-2. Paste `Key ID` (rzp_test_...) and `Secret` into `/app/backend/.env`.
-3. Restart backend. The checkout screen will surface a "Razorpay (UPI + Cards)" option and route through the WebView flow with server-side signature verification.

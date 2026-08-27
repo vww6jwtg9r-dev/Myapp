@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
-import { api, BACKEND_URL, getToken } from '@/src/api';
+import { api } from '@/src/api';
 import { colors, spacing, font } from '@/src/theme';
 
 type OrderInfo = { requires_action: string; key_id: string; order_id: string; amount: number; currency: string; booking_id: string; prefill: { name: string; email?: string; contact?: string } };

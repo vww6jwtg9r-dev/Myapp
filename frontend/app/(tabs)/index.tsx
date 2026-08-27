@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TextInput, Pressable, Image, ActivityIndicator, RefreshControl } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '@/src/auth';
 import { api, fileUrl } from '@/src/api';
 import { Card, Badge, EmptyState } from '@/src/ui';
@@ -13,6 +13,12 @@ type Vehicle = {
   model: string; number_plate: string; driver_name: string; driver_picture?: string | null;
   rating: number; total_seats: number; seats_available: number;
   from_location: string; to_location: string; fare_per_seat: number; departure_time: string;
+  driver_verified?: boolean;
+};
+
+type UpcomingBooking = {
+  booking_id: string; travel_date: string; seat_numbers: number[];
+  vehicle?: { from_location: string; to_location: string; departure_time: string; model: string };
 };
 
 const TYPES: { key: 'all' | 'car' | 'tempo' | 'bus'; label: string; icon: any }[] = [
@@ -24,6 +30,15 @@ const TYPES: { key: 'all' | 'car' | 'tempo' | 'bus'; label: string; icon: any }[
 
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 
+function minutesUntil(dateStr: string, timeStr: string): number {
+  try {
+    const [Y, M, D] = dateStr.split('-').map(Number);
+    const [h, m] = (timeStr || '00:00').split(':').map(Number);
+    const trip = new Date(Y, (M || 1) - 1, D || 1, h || 0, m || 0);
+    return Math.round((trip.getTime() - Date.now()) / 60000);
+  } catch { return Infinity; }
+}
+
 export default function Home() {
   const { user } = useAuth();
   const [from, setFrom] = useState('');
@@ -33,6 +48,7 @@ export default function Home() {
   const [items, setItems] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [reminders, setReminders] = useState<UpcomingBooking[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -46,7 +62,19 @@ export default function Home() {
     } catch (e) { console.log(e); } finally { setLoading(false); setRefreshing(false); }
   }, [from, to, date, type]);
 
+  const loadReminders = useCallback(async () => {
+    try {
+      const mine = await api<any[]>('/bookings/mine');
+      const upcoming = mine.filter(b => b.status === 'paid' && b.vehicle).filter(b => {
+        const mins = minutesUntil(b.travel_date, b.vehicle.departure_time);
+        return mins >= 0 && mins <= 60;
+      });
+      setReminders(upcoming.slice(0, 2));
+    } catch { setReminders([]); }
+  }, []);
+
   useEffect(() => { load(); }, [type]);
+  useFocusEffect(useCallback(() => { loadReminders(); }, [loadReminders]));
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.surfaceSecondary }} edges={['top']}>
@@ -57,6 +85,32 @@ export default function Home() {
       >
         {/* Sticky Header */}
         <View style={styles.header}>
+          {reminders.length > 0 && (
+            <View style={styles.reminderWrap}>
+              {reminders.map(r => {
+                const mins = minutesUntil(r.travel_date, r.vehicle?.departure_time || '00:00');
+                return (
+                  <Pressable
+                    key={r.booking_id}
+                    testID={`reminder-${r.booking_id}`}
+                    onPress={() => router.push({ pathname: '/ticket/[id]', params: { id: r.booking_id } })}
+                    style={styles.reminder}
+                  >
+                    <View style={styles.reminderIcon}><Ionicons name="alarm" size={18} color={colors.warning} /></View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.reminderTitle}>
+                        {mins <= 5 ? 'Departing now' : `Departing in ${mins} min`}
+                      </Text>
+                      <Text style={styles.reminderSub} numberOfLines={1}>
+                        {r.vehicle?.from_location} → {r.vehicle?.to_location} · Seat {r.seat_numbers.join(', ')}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color="#ffffffc0" />
+                  </Pressable>
+                );
+              })}
+            </View>
+          )}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.md }}>
             <View>
               <Text style={styles.hi}>Hi, {user?.name?.split(' ')[0] || 'Traveler'} 👋</Text>
@@ -137,7 +191,15 @@ function VehicleCard({ v, onPress }: { v: Vehicle; onPress: () => void }) {
               <Ionicons name="person" size={22} color="#fff" />}
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={{ fontSize: font.lg, fontWeight: '700', color: colors.onSurface }}>{v.model}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={{ fontSize: font.lg, fontWeight: '700', color: colors.onSurface }}>{v.model}</Text>
+              {v.driver_verified && (
+                <View testID={`verified-${v.vehicle_id}`} style={{ flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: `${colors.brandSecondary}18`, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 10 }}>
+                  <Ionicons name="shield-checkmark" size={12} color={colors.brandSecondary} />
+                  <Text style={{ fontSize: 10, fontWeight: '800', color: colors.brandSecondary }}>Verified</Text>
+                </View>
+              )}
+            </View>
             <Text style={{ color: colors.muted, fontSize: font.sm }}>{v.driver_name} · {v.number_plate}</Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
@@ -175,6 +237,11 @@ function VehicleCard({ v, onPress }: { v: Vehicle; onPress: () => void }) {
 
 const styles = StyleSheet.create({
   header: { backgroundColor: colors.surfaceSecondary, paddingHorizontal: spacing.lg, paddingBottom: spacing.sm, paddingTop: spacing.sm },
+  reminderWrap: { gap: 8, marginBottom: spacing.md },
+  reminder: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: spacing.md, backgroundColor: colors.brandPrimary, borderRadius: radius.md },
+  reminderIcon: { width: 34, height: 34, borderRadius: 12, backgroundColor: '#ffffff18', alignItems: 'center', justifyContent: 'center' },
+  reminderTitle: { color: '#fff', fontWeight: '800', fontSize: font.base },
+  reminderSub: { color: '#ffffffb0', fontSize: font.sm, marginTop: 2 },
   hi: { fontSize: font.xl, fontWeight: '800', color: colors.onSurface },
   subtle: { color: colors.muted, marginTop: 2 },
   avatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: colors.brandPrimary },
