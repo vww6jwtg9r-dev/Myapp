@@ -1,0 +1,192 @@
+{
+  "app_name": "RideReserve",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "Clean, map-first architecture with high-contrast functional UI, inspired by Uber and RedBus.",
+  "color": {
+    "surface": "#FFFFFF",
+    "onSurface": "#111827",
+    "surfaceSecondary": "#F3F4F6",
+    "onSurfaceSecondary": "#374151",
+    "surfaceTertiary": "#E5E7EB",
+    "onSurfaceTertiary": "#4B5563",
+    "surfaceInverse": "#111827",
+    "onSurfaceInverse": "#FFFFFF",
+    "brand": "#0B192C",
+    "brandPrimary": "#0B192C",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#05A357",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#E6E9EE",
+    "onBrandTertiary": "#0B192C",
+    "success": "#05A357",
+    "onSuccess": "#FFFFFF",
+    "warning": "#FFCB00",
+    "onWarning": "#111827",
+    "error": "#D72113",
+    "onError": "#FFFFFF",
+    "info": "#3B82F6",
+    "onInfo": "#FFFFFF",
+    "border": "#E5E7EB",
+    "borderStrong": "#D1D5DB",
+    "divider": "#F3F4F6"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Plus Jakarta Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous vertical breathing room for readability, safe areas strictly respected.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 16,
+    "pill": 999
+  },
+  "shadow_tier": 1,
+  "navigation": "bottom_tabs",
+  "icon_set": "Ionicons",
+  "glassmorphism": {
+    "enabled": true,
+    "do's": [
+      "Floating action bottom sheets overlaid on map views.",
+      "Bottom tab bar.",
+      "Persistent sticky summaries at the bottom of the seat selection screen."
+    ],
+    "dont's": [
+      "Do not apply glass to data-heavy admin dashboards.",
+      "Do not blur standard list cards."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "HomeSearch_Passenger",
+      "purpose": "Map-first search interface allowing users to filter and find rides easily.",
+      "states": {
+        "loading": "Map loading skeleton with pulsing overlay",
+        "empty": "No rides found for the selected route. Prompt to change dates or vehicle type.",
+        "error": "Failed to load routes. Retry button."
+      },
+      "layout": "Map view covering 70% of screen. Floating bottom sheet at the bottom for 'Where to?', 'Date' inputs, and Vehicle type filter pills (Car/Tempo/Bus). Use Deep Navy for text and Emerald Green for the main 'Search' CTA button."
+    },
+    {
+      "name": "VehicleListing",
+      "purpose": "List available rides with clear details and pricing.",
+      "states": {
+        "loading": "Skeleton list of cards",
+        "empty": "No vehicles available for this route.",
+        "error": "Error fetching vehicles."
+      },
+      "layout": "Vertical scroll list. Each card has a 16px border-radius, subtle shadow (shadow tier 1). Inside: Driver photo avatar on the left, Name and rating (Amber Yellow) next to it. Vehicle model and departure time right-aligned. Bottom row of card: Seat availability badge and Price/seat. CTA to select seats."
+    },
+    {
+      "name": "SeatSelection",
+      "purpose": "Visual representation of vehicle layout allowing intuitive seat picking.",
+      "states": {
+        "loading": "Skeleton grid",
+        "empty": "N/A",
+        "error": "Seat map unavailable."
+      },
+      "layout": "Grid-based visual seat map (columns based on vehicle type). Seat states: Available (surfaceSecondary with border), Selected (Emerald Green background), Booked (surfaceTertiary/disabled). Sticky bottom sheet with Trip Summary (seats selected, total price) and an Emerald Green 'Continue to Checkout' button."
+    },
+    {
+      "name": "DigitalTicket",
+      "purpose": "Post-booking confirmation displaying the QR code and driver contact info.",
+      "states": {
+        "loading": "Generating ticket...",
+        "empty": "N/A",
+        "error": "Failed to load ticket details."
+      },
+      "layout": "Central elevated card resembling a physical ticket. QR code at the center. Driver contact details (unlocked post-payment) below it. Actions to download or share."
+    },
+    {
+      "name": "DriverDashboard",
+      "purpose": "Overview of driver earnings, upcoming trips, and vehicle status.",
+      "states": {
+        "loading": "Skeleton dashboard",
+        "empty": "No upcoming rides. Add a route.",
+        "error": "Error fetching stats."
+      },
+      "layout": "Top section: Earnings summary (50/50 split prominently displayed) with an Emerald Green 'Withdraw' CTA. Middle section: 'My Vehicle' registration status. Bottom section: List of upcoming passenger bookings."
+    },
+    {
+      "name": "AdminDashboard",
+      "purpose": "High-level overview of platform operations for the admin.",
+      "states": {
+        "loading": "Loading admin stats",
+        "empty": "No pending approvals.",
+        "error": "Failed to load platform data."
+      },
+      "layout": "Grid of key metric cards (Total Revenue, Active Drivers, Total Bookings). Below that, a list of 'Pending Vehicle Approvals' with quick Accept/Reject actions. Deep Navy headers, structured data density."
+    }
+  ],
+  "images": {
+    "map_background": {
+      "url": "https://images.unsplash.com/photo-1604357209793-fca5dca89f97?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwxfHxtb2JpbGUlMjBtYXAlMjBpbnRlcmZhY2UlMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc4NzgwNTk1N3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Mobile map interface on smartphone"
+    },
+    "driver_avatar": {
+      "url": "https://images.unsplash.com/photo-1473655587843-eda8944061e8?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1OTV8MHwxfHNlYXJjaHwxfHxzbWlsaW5nJTIwZHJpdmVyJTIwcG9ydHJhaXR8ZW58MHx8fHwxNzg3ODA1OTYyfDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Smiling driver leaning out of vehicle"
+    },
+    "car_sedan": {
+      "url": "https://images.unsplash.com/photo-1623869675781-80aa31012a5a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NjZ8MHwxfHNlYXJjaHwxfHx3aGl0ZSUyMG1vZGVybiUyMHNlZGFuJTIwY2FyfGVufDB8fHx8MTc4NzgwNTk1N3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "White modern sedan car"
+    },
+    "bus_passenger": {
+      "url": "https://images.unsplash.com/photo-1570118054363-ff4d296962f5?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzB8MHwxfHNlYXJjaHwxfHx0b3VyaXN0JTIwcGFzc2VuZ2VyJTIwYnVzfGVufDB8fHx8MTc4NzgwNTk1N3ww&ixlib=rb-4.1.0&q=85",
+      "alt": "Tourist passenger bus on road"
+    },
+    "tempo_van": {
+      "url": "https://images.unsplash.com/photo-1563729494519-6cef8197f355?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njl8MHwxfHNlYXJjaHwxfHxtaW5pYnVzJTIwcGFzc2VuZ2VyJTIwdmFufGVufDB8fHx8MTc4NzgwNTk2Mnww&ixlib=rb-4.1.0&q=85",
+      "alt": "White minibus passenger van parked"
+    },
+    "driver_dashboard_bg": {
+      "url": "https://images.unsplash.com/photo-1780615835963-c52dfc857769?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzh8MHwxfHNlYXJjaHwxfHxkcml2ZXIlMjBoYW5kcyUyMG9uJTIwc3RlZXJpbmclMjB3aGVlbCUyMGRhc2hib2FyZHxlbnwwfHx8fDE3ODc4MDU5NTd8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Driver hands on steering wheel dashboard"
+    }
+  },
+  "haptics": {
+    "booking_cta": "impactMedium",
+    "seat_select": "impactLight",
+    "tab_switch": "selection",
+    "ticket_generated": "notificationSuccess",
+    "role_switch": "impactHeavy"
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the color palette: Deep Navy Blue (brandPrimary) for core UI anchors, Emerald Green (brandSecondary/success) for booking actions/buttons, Amber Yellow (warning) for ratings, and Light Gray (surfaceSecondary) for backgrounds and inactive elements.",
+    "Implement a Map-first layout on the HomeSearch_Passenger screen. Use the 'map_background' image behind a floating `@gorhom/bottom-sheet` (with glassmorphism enabled) for search inputs.",
+    "For the SeatSelection screen, build an interactive grid (columns adapt to car/tempo/bus). Empty seats should have a border, selected seats must use the Emerald Green color, and booked seats should be inactive/greyed out.",
+    "Cards across the app MUST have a 16px border-radius (`lg` token) and a subtle shadow (tier 1), aligning with the requested Uber/RedBus minimal aesthetic.",
+    "Primary call-to-actions, like 'Search' or 'Continue to Checkout', should stick to the bottom above the home indicator, especially on scrollable screens, using the Emerald Green color.",
+    "In the DigitalTicket screen, use a stylized ticket view with an embedded QR code placeholder. Driver details remain hidden/obfuscated before payment is complete.",
+    "Never use Indigo, Violet, Purple, or any Blues other than the explicitly requested Deep Navy Blue.",
+    "Ensure Loading, Empty, and Error states fill the flex layout appropriately for every data-fetching screen."
+  ]
+}
