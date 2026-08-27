@@ -9,6 +9,11 @@ interface Props {
   height?: number;
 }
 
+// SEC-005: escape user strings before interpolating into <script>
+function jsSafe(v: string | number): string {
+  return JSON.stringify(String(v)).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
+}
+
 // OpenStreetMap tiles + Leaflet in an isolated HTML doc so it works in Expo Go on iOS + Android.
 export function RouteMap({ from, to, height = 220 }: Props) {
   const html = useMemo(() => `<!doctype html><html><head>
@@ -20,8 +25,8 @@ export function RouteMap({ from, to, height = 220 }: Props) {
     <div id="m"></div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-      const A = [${from.lat}, ${from.lon}];
-      const B = [${to.lat}, ${to.lon}];
+      const A = [${Number(from.lat)}, ${Number(from.lon)}];
+      const B = [${Number(to.lat)}, ${Number(to.lon)}];
       const map = L.map('m', { zoomControl: false, attributionControl: false }).setView(A, 6);
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
       const mkIcon = (color, label) => L.divIcon({
@@ -29,8 +34,8 @@ export function RouteMap({ from, to, height = 220 }: Props) {
         html: '<div style="background:'+color+';color:#fff;padding:4px 8px;border-radius:10px;font-family:system-ui;font-weight:700;font-size:12px;box-shadow:0 2px 6px rgba(0,0,0,.25)">'+label+'</div>',
         iconSize: [40, 24], iconAnchor: [20, 12],
       });
-      L.marker(A, { icon: mkIcon('#0B192C', 'A') }).addTo(map).bindPopup(${JSON.stringify(from.label)});
-      L.marker(B, { icon: mkIcon('#05A357', 'B') }).addTo(map).bindPopup(${JSON.stringify(to.label)});
+      L.marker(A, { icon: mkIcon('#0B192C', 'A') }).addTo(map).bindPopup(${jsSafe(from.label)});
+      L.marker(B, { icon: mkIcon('#05A357', 'B') }).addTo(map).bindPopup(${jsSafe(to.label)});
       L.polyline([A, B], { color: '#05A357', weight: 4, dashArray: '6,8' }).addTo(map);
       map.fitBounds([A, B], { padding: [30, 30] });
     </script>

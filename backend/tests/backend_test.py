@@ -7,6 +7,8 @@ import pytest
 import requests
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from conftest import otp_login  # noqa: E402
+
 BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://mobility-reserve-3.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
@@ -23,9 +25,8 @@ def s():
 
 @pytest.fixture(scope="session")
 def passenger_auth(s):
-    phone = f"+9199{uuid.uuid4().hex[:8]}"
-    s.post(f"{API}/auth/otp/send", json={"phone": phone})
-    r = s.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": "123456", "name": "TEST Passenger"})
+    phone = f"+9199{uuid.uuid4().int % 10**8:08d}"
+    r = otp_login(s, phone, name="TEST Passenger")
     assert r.status_code == 200, r.text
     data = r.json()
     return {"token": data["session_token"], "user": data["user"], "phone": phone}
@@ -33,9 +34,8 @@ def passenger_auth(s):
 
 @pytest.fixture(scope="session")
 def driver_auth(s):
-    phone = f"+9199{uuid.uuid4().hex[:8]}"
-    s.post(f"{API}/auth/otp/send", json={"phone": phone})
-    r = s.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": "123456", "name": "TEST Driver"})
+    phone = f"+9199{uuid.uuid4().int % 10**8:08d}"
+    r = otp_login(s, phone, name="TEST Driver")
     data = r.json()
     token = data["session_token"]
     # switch role
@@ -47,8 +47,8 @@ def driver_auth(s):
 def admin_auth(s):
     """Promote a new phone user to admin via direct Mongo write (sync pymongo)."""
     from pymongo import MongoClient
-    phone = f"+9199{uuid.uuid4().hex[:8]}"
-    r = s.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": "123456", "name": "TEST Admin"})
+    phone = f"+9199{uuid.uuid4().int % 10**8:08d}"
+    r = otp_login(s, phone, name="TEST Admin")
     data = r.json()
     token = data["session_token"]
     uid = data["user"]["user_id"]
@@ -65,19 +65,39 @@ def auth_h(token):
 # ---------- Auth ----------
 class TestAuth:
     def test_otp_send(self, s):
-        r = s.post(f"{API}/auth/otp/send", json={"phone": "+919999111222"})
+        phone = "+919999111222"
+        # Clear rate-limit window so rerun is stable
+        from pymongo import MongoClient
+        MongoClient(MONGO_URL)[DB_NAME].otp_codes.delete_many({"phone": phone})
+        r = s.post(f"{API}/auth/otp/send", json={"phone": phone})
         assert r.status_code == 200
-        assert r.json().get("dev_code") == "123456"
+        code = r.json().get("dev_code")
+        assert code and code.isdigit() and len(code) == 6
+
+    def test_otp_send_returns_new_code_each_time(self, s):
+        phone = f"+9199{uuid.uuid4().int % 10**8:08d}"
+        r1 = s.post(f"{API}/auth/otp/send", json={"phone": phone})
+        r2 = s.post(f"{API}/auth/otp/send", json={"phone": phone})
+        assert r1.status_code == 200 and r2.status_code == 200
+        # Random 6-digit codes should differ (collision prob 1e-6)
+        assert r1.json()["dev_code"] != r2.json()["dev_code"]
 
     def test_otp_verify_bad_code(self, s):
-        r = s.post(f"{API}/auth/otp/verify", json={"phone": "+919999111333", "code": "000000"})
+        phone = f"+9199{uuid.uuid4().int % 10**8:08d}"
+        s.post(f"{API}/auth/otp/send", json={"phone": phone})
+        r = s.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": "000000"})
         assert r.status_code == 401
 
     def test_otp_verify_good(self, s):
-        r = s.post(f"{API}/auth/otp/verify", json={"phone": "+919999111444", "code": "123456", "name": "T"})
+        phone = "+919999111444"
+        from pymongo import MongoClient
+        MongoClient(MONGO_URL)[DB_NAME].otp_codes.delete_many({"phone": phone})
+        r_send = s.post(f"{API}/auth/otp/send", json={"phone": phone})
+        code = r_send.json()["dev_code"]
+        r = s.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": code, "name": "T"})
         assert r.status_code == 200
         assert "session_token" in r.json()
-        assert r.json()["user"]["phone"] == "+919999111444"
+        assert r.json()["user"]["phone"] == phone
 
     def test_auth_me(self, s, passenger_auth):
         r = s.get(f"{API}/auth/me", headers=auth_h(passenger_auth["token"]))
@@ -155,9 +175,8 @@ class TestVehicles:
 class TestBookings:
     def test_create_pay_and_persist(self, s, passenger_auth):
         travel_date = (date.today() + timedelta(days=5)).isoformat()
-        # Use unique seats to avoid collisions on repeated DB runs
-        seats = [(int(uuid.uuid4().int) % 3) + 1, ((int(uuid.uuid4().int) % 3) + 1) + 3]
-        seats = list({seats[0], seats[0] + 1})[:2] if len(set(seats)) < 2 else seats
+        # Car has 4 seats. Pick 2 unique seats within [1..4].
+        seats = [1, 2]
         payload = {"vehicle_id": "veh_demo_car_01", "travel_date": travel_date, "seat_numbers": seats}
         r = s.post(f"{API}/bookings", json=payload, headers=auth_h(passenger_auth["token"]))
         if r.status_code == 409:
@@ -214,12 +233,9 @@ class TestBookings:
 
 # ---------- Wallet ----------
 class TestWallet:
-    def test_driver_wallet_after_payment(self, s):
+    def test_driver_wallet_after_payment(self, s, demo_driver_token):
         """Seeded demo driver should have wallet balance credited after passenger payments above."""
-        # Log in as seeded demo driver - need to authenticate with matching phone
-        r = s.post(f"{API}/auth/otp/verify", json={"phone": "+919000000001", "code": "123456"})
-        assert r.status_code == 200
-        token = r.json()["session_token"]
+        token = demo_driver_token
         rw = s.get(f"{API}/wallet/me", headers=auth_h(token))
         assert rw.status_code == 200
         data = rw.json()
@@ -232,9 +248,8 @@ class TestWallet:
                    headers=auth_h(passenger_auth["token"]))
         assert r.status_code == 400
 
-    def test_withdraw_ok(self, s):
-        r = s.post(f"{API}/auth/otp/verify", json={"phone": "+919000000001", "code": "123456"})
-        token = r.json()["session_token"]
+    def test_withdraw_ok(self, s, demo_driver_token):
+        token = demo_driver_token
         # Get current balance
         w = s.get(f"{API}/wallet/me", headers=auth_h(token)).json()
         if w["balance"] >= 100:
@@ -245,9 +260,8 @@ class TestWallet:
 
 # ---------- Driver bookings ----------
 class TestDriverBookings:
-    def test_driver_list(self, s):
-        r = s.post(f"{API}/auth/otp/verify", json={"phone": "+919000000001", "code": "123456"})
-        token = r.json()["session_token"]
+    def test_driver_list(self, s, demo_driver_token):
+        token = demo_driver_token
         rb = s.get(f"{API}/bookings/driver/list", headers=auth_h(token))
         assert rb.status_code == 200
         assert isinstance(rb.json(), list)

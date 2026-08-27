@@ -25,8 +25,11 @@ def auth_h(token):
 
 
 def _login_new(sess, name="TEST V3 User"):
-    phone = f"+9197{uuid.uuid4().hex[:8]}"
-    r = sess.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": "123456", "name": name})
+    phone = f"+9197{uuid.uuid4().int % 10**8:08d}"
+    rs = sess.post(f"{API}/auth/otp/send", json={"phone": phone})
+    assert rs.status_code == 200, rs.text
+    code = rs.json()["dev_code"]
+    r = sess.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": code, "name": name})
     assert r.status_code == 200, r.text
     d = r.json()
     return {"token": d["session_token"], "user": d["user"], "phone": phone}
@@ -50,12 +53,13 @@ def _book_and_pay(sess, token, vehicle_id, travel_date=None, seats=None, method=
     if travel_date is None:
         travel_date = _future_date()
     if seats is None:
-        seats = [(int(uuid.uuid4().int) % 20) + 1]
+        # Keep within car's 4-seat cap (also safe for tempo/bus).
+        seats = [(int(uuid.uuid4().int) % 4) + 1]
     r = _book(sess, token, vehicle_id, travel_date, seats)
     tries = 0
     while r.status_code == 409 and tries < 5:
         travel_date = _future_date()
-        seats = [(int(uuid.uuid4().int) % 20) + 1]
+        seats = [(int(uuid.uuid4().int) % 4) + 1]
         r = _book(sess, token, vehicle_id, travel_date, seats)
         tries += 1
     assert r.status_code == 200, r.text

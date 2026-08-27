@@ -16,6 +16,8 @@ export default function RazorpayScreen() {
   const webRef = useRef<WebView>(null);
 
   const amount = parseInt(params.amount || '0', 10);
+  // SEC-005: escape strings before injecting into inline <script>
+  const jsSafe = (v: string) => JSON.stringify(String(v || '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
   const html = `<!doctype html><html><head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -26,13 +28,13 @@ export default function RazorpayScreen() {
     <script>
       const post = (m) => window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(m));
       const options = {
-        key: ${JSON.stringify(params.key_id)},
-        amount: ${amount},
-        currency: ${JSON.stringify(params.currency)},
+        key: ${jsSafe(params.key_id as string)},
+        amount: ${Number(amount) || 0},
+        currency: ${jsSafe(params.currency as string)},
         name: "RideReserve",
         description: "Seat booking",
-        order_id: ${JSON.stringify(params.order_id)},
-        prefill: { name: ${JSON.stringify(params.name || '')}, email: ${JSON.stringify(params.email || '')}, contact: ${JSON.stringify(params.contact || '')} },
+        order_id: ${jsSafe(params.order_id as string)},
+        prefill: { name: ${jsSafe((params.name as string) || '')}, email: ${jsSafe((params.email as string) || '')}, contact: ${jsSafe((params.contact as string) || '')} },
         theme: { color: "#05A357" },
         handler: function(response){ post({ type: "success", ...response }); },
         modal: { ondismiss: function(){ post({ type: "dismissed" }); } }

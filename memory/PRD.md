@@ -33,3 +33,17 @@ Mobile-first Vehicle Seat Reservation & Ride Sharing platform (Cars, Tempos, Bus
 - `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` — blank falls back to mock; add for live UPI/Cards
 - `REFERRAL_BONUS` = 50
 - `PLATFORM_COMMISSION_RATE` = 0.5
+- `OTP_DEV_MODE` (default `false`) — when `true`, `dev_code` is returned in OTP send response. **Set to `false` in production.**
+- `PAYMENT_MOCK_ALLOWED` (default `false`) — when `true`, mocked GPay/PhonePe/UPI succeed. **Set to `false` in production.**
+- `CORS_ORIGINS` — comma-separated list; blank means wildcard (credentials disabled).
+
+## Security posture
+Audit findings SEC-001–SEC-005 all closed (74/74 backend tests pass). Key controls:
+- OTP: random 6-digit, bcrypt-hashed, 5-min TTL, single-use, 5-attempt-per-code lock, 5-sends-per-phone/hour rate limit, admin accounts blocked from OTP.
+- Booking GET: passenger/driver/admin only.
+- Payment: mock path gated behind env flag; enforced Razorpay when keys present.
+- Cancel: refused after departure time.
+- Withdraw: Pydantic gt=0, atomic conditional decrement.
+- Upload: extension-forced MIME, 5MB cap, X-Content-Type-Options: nosniff.
+- WebView HTML: user strings escaped (`</script>` breakout blocked) in Leaflet + Razorpay.
+- CORS: credentials disabled with wildcard origin.

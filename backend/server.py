@@ -24,6 +24,8 @@ try:
 except Exception:  # pragma: no cover
     razorpay = None
 
+import bcrypt
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
@@ -39,6 +41,16 @@ RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "").strip()
 RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "").strip()
 RAZORPAY_ENABLED = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and razorpay)
 rzp_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) if RAZORPAY_ENABLED else None
+OTP_DEV_MODE = os.environ.get("OTP_DEV_MODE", "false").strip().lower() in {"1", "true", "yes"}
+PAYMENT_MOCK_ALLOWED = os.environ.get("PAYMENT_MOCK_ALLOWED", "false").strip().lower() in {"1", "true", "yes"}
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()] or ["*"]
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5MB
+ALLOWED_IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "heic", "heif"}
+ALLOWED_IMAGE_MIME = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+OTP_TTL_SECONDS = 5 * 60
+OTP_MAX_ATTEMPTS = 5
+OTP_SEND_WINDOW_SECONDS = 60 * 60
+OTP_SEND_MAX_PER_WINDOW = 5
 
 STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
 STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
@@ -146,7 +158,7 @@ class Vehicle(VehicleIn):
 class BookingCreateIn(BaseModel):
     vehicle_id: str
     travel_date: str  # YYYY-MM-DD
-    seat_numbers: List[int]
+    seat_numbers: List[int] = Field(min_length=1, max_length=40)
 
 
 class Booking(BaseModel):
@@ -179,8 +191,8 @@ class VerifyPayIn(BaseModel):
 
 
 class WithdrawIn(BaseModel):
-    amount: float
-    upi_id: str
+    amount: float = Field(gt=0, le=1_000_000)
+    upi_id: str = Field(min_length=3, max_length=100)
 
 
 class ReviewIn(BaseModel):
@@ -302,19 +314,85 @@ async def auth_session(payload: SessionExchangeIn):
     return {"session_token": session_token, "user": user}
 
 
-# ---------- Auth: Phone OTP (MOCKED) ----------
+# ---------- Auth: Phone OTP ----------
+def _normalize_phone(p: str) -> str:
+    return "".join(ch for ch in (p or "").strip() if ch.isdigit() or ch == "+")
+
+
+def _hash_otp(code: str) -> str:
+    return bcrypt.hashpw(code.encode(), bcrypt.gensalt(rounds=8)).decode()
+
+
+def _verify_otp_hash(code: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(code.encode(), hashed.encode())
+    except Exception:
+        return False
+
+
 @api.post("/auth/otp/send")
 async def otp_send(payload: OtpSendIn):
-    # MOCKED: any phone gets OTP 123456
-    return {"ok": True, "message": "OTP sent (DEMO: use 123456)", "dev_code": "123456"}
+    phone = _normalize_phone(payload.phone)
+    if len(phone) < 8 or len(phone) > 16:
+        raise HTTPException(status_code=400, detail="Invalid phone")
+
+    # Rate limit: count sends in the last window
+    since = now_utc() - timedelta(seconds=OTP_SEND_WINDOW_SECONDS)
+    recent = await db.otp_codes.count_documents({"phone": phone, "created_at": {"$gte": since}})
+    if recent >= OTP_SEND_MAX_PER_WINDOW:
+        raise HTTPException(status_code=429, detail="Too many OTP requests. Try later.")
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    await db.otp_codes.insert_one({
+        "phone": phone,
+        "code_hash": _hash_otp(code),
+        "expires_at": now_utc() + timedelta(seconds=OTP_TTL_SECONDS),
+        "attempts": 0,
+        "consumed": False,
+        "created_at": now_utc(),
+    })
+    resp: dict = {"ok": True, "message": "OTP sent to your phone"}
+    if OTP_DEV_MODE:
+        resp["dev_code"] = code
+        resp["message"] = f"OTP sent (DEV mode: use {code})"
+    return resp
 
 
 @api.post("/auth/otp/verify")
 async def otp_verify(payload: OtpVerifyIn):
-    if payload.code.strip() != "123456":
+    phone = _normalize_phone(payload.phone)
+    code = (payload.code or "").strip()
+    if not code.isdigit() or len(code) != 6:
+        raise HTTPException(status_code=400, detail="Invalid OTP format")
+
+    # Block OTP path for admins — force them to use Google auth
+    existing_admin = await db.users.find_one({"phone": phone, "is_admin": True}, {"_id": 0, "user_id": 1})
+    if existing_admin:
+        raise HTTPException(status_code=403, detail="Admin accounts must sign in with Google")
+
+    otp_doc = await db.otp_codes.find_one({"phone": phone, "consumed": False}, sort=[("created_at", -1)])
+    if not otp_doc:
+        raise HTTPException(status_code=401, detail="OTP not found or already used. Request a new code.")
+    exp = otp_doc["expires_at"]
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp < now_utc():
+        raise HTTPException(status_code=401, detail="OTP expired. Request a new code.")
+    if otp_doc.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
+        await db.otp_codes.update_one({"_id": otp_doc["_id"]}, {"$set": {"consumed": True}})
+        raise HTTPException(status_code=429, detail="Too many attempts. Request a new code.")
+
+    if not _verify_otp_hash(code, otp_doc["code_hash"]):
+        await db.otp_codes.update_one({"_id": otp_doc["_id"]}, {"$inc": {"attempts": 1}})
         raise HTTPException(status_code=401, detail="Invalid OTP")
-    name = payload.name or f"User {payload.phone[-4:]}"
-    user = await upsert_user(email=None, phone=payload.phone, name=name, picture=None)
+
+    await db.otp_codes.update_one({"_id": otp_doc["_id"]}, {"$set": {"consumed": True}})
+
+    name = (payload.name or "").strip() or f"User {phone[-4:]}"
+    user = await upsert_user(email=None, phone=phone, name=name, picture=None)
+    # Do not allow escalation via phone login even if somehow flagged admin later
+    if user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="Admin accounts must sign in with Google")
     token = await create_session(user["user_id"])
     return {"session_token": token, "user": user}
 
@@ -347,12 +425,18 @@ async def update_me(payload: ProfileUpdateIn, user=Depends(get_current_user)):
 # ---------- Upload ----------
 @api.post("/upload")
 async def upload_file(file: UploadFile = File(...), user=Depends(get_current_user)):
-    ext = (file.filename or "bin").split(".")[-1].lower()
-    if ext not in {"jpg", "jpeg", "png", "webp", "heic", "heif"}:
+    ext = (file.filename or "bin").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else "jpg"
+    if ext not in ALLOWED_IMAGE_EXTS:
         ext = "jpg"
-    path = f"{APP_NAME}/uploads/{user['user_id']}/{uuid.uuid4().hex}.{ext}"
+    # SEC-005: force safe content-type by extension; ignore client-supplied Content-Type
+    ext_to_mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "heic": "image/heic", "heif": "image/heif"}
+    content_type = ext_to_mime.get(ext, "image/jpeg")
     data = await file.read()
-    content_type = file.content_type or "image/jpeg"
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large (max {MAX_UPLOAD_BYTES // 1024 // 1024} MB)")
+    if len(data) < 8:
+        raise HTTPException(status_code=400, detail="Empty file")
+    path = f"{APP_NAME}/uploads/{user['user_id']}/{uuid.uuid4().hex}.{ext}"
     await run_in_threadpool(put_object, path, data, content_type)
     await db.files.insert_one({
         "path": path,
@@ -367,12 +451,23 @@ async def upload_file(file: UploadFile = File(...), user=Depends(get_current_use
 
 @api.get("/files/{path:path}")
 async def get_file(path: str):
-    # Public read for images (no auth) - avoids web/native header issues; ownership tracked in DB.
+    # Public read for images. SEC-005: only serve if we recorded it, and never as HTML.
     meta = await db.files.find_one({"path": path}, {"_id": 0})
     if not meta:
         raise HTTPException(status_code=404, detail="Not found")
-    content, ctype = await run_in_threadpool(get_object, path)
-    return Response(content=content, media_type=ctype)
+    ctype = meta.get("content_type") or "application/octet-stream"
+    if ctype not in ALLOWED_IMAGE_MIME:
+        ctype = "application/octet-stream"
+    content, _srv_ct = await run_in_threadpool(get_object, path)
+    return Response(
+        content=content,
+        media_type=ctype,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": "inline",
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
 
 
 # ---------- Vehicles ----------
@@ -469,17 +564,33 @@ async def create_booking(payload: BookingCreateIn, user=Depends(get_current_user
     if v["status"] != "approved":
         raise HTTPException(status_code=400, detail="Vehicle not approved")
 
+    # Validate seat numbers: unique, positive, within capacity
+    seats = list(dict.fromkeys(payload.seat_numbers))  # de-dupe preserving order
+    if len(seats) != len(payload.seat_numbers):
+        raise HTTPException(status_code=400, detail="Duplicate seat numbers")
+    for s in seats:
+        if not isinstance(s, int) or s < 1 or s > v["total_seats"]:
+            raise HTTPException(status_code=400, detail=f"Invalid seat number: {s}")
+
+    # Validate travel_date (YYYY-MM-DD) and not in past
+    try:
+        d = datetime.strptime(payload.travel_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format")
+    if d < datetime.now(timezone.utc).date():
+        raise HTTPException(status_code=400, detail="Travel date in the past")
+
     # Check seat conflicts
     booked = await db.bookings.find(
         {"vehicle_id": payload.vehicle_id, "travel_date": payload.travel_date, "status": "paid"},
         {"_id": 0, "seat_numbers": 1},
     ).to_list(500)
     taken = {s for b in booked for s in b["seat_numbers"]}
-    conflict = [s for s in payload.seat_numbers if s in taken]
+    conflict = [s for s in seats if s in taken]
     if conflict:
         raise HTTPException(status_code=409, detail=f"Seats already booked: {conflict}")
 
-    total = v["fare_per_seat"] * len(payload.seat_numbers)
+    total = v["fare_per_seat"] * len(seats)
     commission = round(total * COMMISSION_RATE, 2)
     driver_earn = round(total - commission, 2)
 
@@ -491,8 +602,8 @@ async def create_booking(payload: BookingCreateIn, user=Depends(get_current_user
         "passenger_name": user["name"],
         "passenger_phone": user.get("phone"),
         "travel_date": payload.travel_date,
-        "seat_numbers": payload.seat_numbers,
-        "seat_count": len(payload.seat_numbers),
+        "seat_numbers": seats,
+        "seat_count": len(seats),
         "total_amount": total,
         "driver_earning": driver_earn,
         "platform_commission": commission,
@@ -587,7 +698,13 @@ async def pay_booking(booking_id: str, payload: PayIn, user=Depends(get_current_
             "prefill": {"name": user["name"], "email": user.get("email") or "", "contact": user.get("phone") or ""},
         }
 
-    # Mock flow (GPay/PhonePe/UPI)
+    # SEC-003: mock path only allowed when explicitly enabled or Razorpay not configured
+    if RAZORPAY_ENABLED and payload.method != "razorpay":
+        raise HTTPException(status_code=400, detail="Razorpay checkout required. Use method='razorpay'.")
+    if not PAYMENT_MOCK_ALLOWED:
+        raise HTTPException(status_code=503, detail="Payment gateway not configured")
+
+    # Mock flow (GPay/PhonePe/UPI) — DEV/preview only
     return await _fulfill_paid_booking(booking_id, payload.method)
 
 
@@ -637,7 +754,12 @@ async def get_booking(booking_id: str, user=Depends(get_current_user)):
     b = await db.bookings.find_one({"booking_id": booking_id}, {"_id": 0})
     if not b:
         raise HTTPException(status_code=404, detail="Not found")
+    # SEC-002: only passenger or the vehicle's driver can read the booking
+    is_passenger = b["passenger_id"] == user["user_id"]
     v = await db.vehicles.find_one({"vehicle_id": b["vehicle_id"]}, {"_id": 0})
+    is_driver = bool(v and v.get("driver_id") == user["user_id"])
+    if not (is_passenger or is_driver or user.get("is_admin")):
+        raise HTTPException(status_code=404, detail="Not found")
     if v:
         b["vehicle"] = {
             "model": v["model"],
@@ -677,20 +799,30 @@ async def cancel_booking(booking_id: str, user=Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Booking not found")
     if b["status"] == "cancelled":
         return b
-    if b["status"] == "paid":
-        # Refund: reverse driver credit + platform commission (simplified: full refund from wallets)
-        v = await db.vehicles.find_one({"vehicle_id": b["vehicle_id"]}, {"_id": 0})
-        if v:
-            await db.users.update_one({"user_id": v["driver_id"]}, {"$inc": {"wallet_balance": -b["driver_earning"]}})
-            await db.transactions.insert_one({
-                "txn_id": f"tx_{uuid.uuid4().hex[:12]}",
-                "user_id": v["driver_id"],
-                "booking_id": booking_id,
-                "type": "debit",
-                "amount": b["driver_earning"],
-                "note": f"Refund for cancelled booking {booking_id}",
-                "created_at": now_utc(),
-            })
+
+    # SEC-003 hardening: cannot cancel after departure time (prevents free-ride attack)
+    v = await db.vehicles.find_one({"vehicle_id": b["vehicle_id"]}, {"_id": 0})
+    if v:
+        try:
+            Y, M, D = [int(x) for x in b["travel_date"].split("-")]
+            h, m = [int(x) for x in (v.get("departure_time") or "00:00").split(":")]
+            departure = datetime(Y, M, D, h, m, tzinfo=timezone.utc)
+            if now_utc() >= departure:
+                raise HTTPException(status_code=400, detail="Cannot cancel after departure time")
+        except ValueError:
+            pass
+
+    if b["status"] == "paid" and v:
+        await db.users.update_one({"user_id": v["driver_id"]}, {"$inc": {"wallet_balance": -b["driver_earning"]}})
+        await db.transactions.insert_one({
+            "txn_id": f"tx_{uuid.uuid4().hex[:12]}",
+            "user_id": v["driver_id"],
+            "booking_id": booking_id,
+            "type": "debit",
+            "amount": b["driver_earning"],
+            "note": f"Refund for cancelled booking {booking_id}",
+            "created_at": now_utc(),
+        })
     await db.bookings.update_one(
         {"booking_id": booking_id},
         {"$set": {"status": "cancelled", "cancelled_at": now_utc()}},
@@ -708,10 +840,15 @@ async def wallet_me(user=Depends(get_current_user)):
 
 @api.post("/wallet/withdraw")
 async def withdraw(payload: WithdrawIn, user=Depends(get_current_user)):
-    fresh = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0})
-    if not fresh or fresh.get("wallet_balance", 0) < payload.amount:
+    # SEC-004: atomic conditional decrement (prevents race + defense-in-depth against negatives)
+    result = await db.users.find_one_and_update(
+        {"user_id": user["user_id"], "wallet_balance": {"$gte": payload.amount}},
+        {"$inc": {"wallet_balance": -payload.amount}},
+        projection={"_id": 0, "wallet_balance": 1},
+        return_document=True,
+    )
+    if not result:
         raise HTTPException(status_code=400, detail="Insufficient balance")
-    await db.users.update_one({"user_id": user["user_id"]}, {"$inc": {"wallet_balance": -payload.amount}})
     await db.transactions.insert_one({
         "txn_id": f"tx_{uuid.uuid4().hex[:12]}",
         "user_id": user["user_id"],
@@ -720,7 +857,7 @@ async def withdraw(payload: WithdrawIn, user=Depends(get_current_user)):
         "note": f"Withdrawn to UPI {payload.upi_id}",
         "created_at": now_utc(),
     })
-    return {"ok": True, "message": "Withdrawal initiated"}
+    return {"ok": True, "message": "Withdrawal initiated", "balance": result.get("wallet_balance", 0)}
 
 
 # ---------- Admin ----------
@@ -930,10 +1067,11 @@ async def root():
 
 app.include_router(api)
 
+# CORS: mobile apps don't send Origin. Bearer tokens (not cookies) → credentials must be False for wildcard.
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
+    allow_credentials=CORS_ORIGINS != ["*"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -951,6 +1089,8 @@ async def seed():
     await db.reviews.create_index("booking_id", unique=True)
     await db.reviews.create_index("vehicle_id")
     await db.users.create_index("referral_code", sparse=True)
+    await db.otp_codes.create_index("phone")
+    await db.otp_codes.create_index("expires_at", expireAfterSeconds=0)
 
     # Seed admin
     admin_email = "admin@ridereserve.app"

@@ -15,8 +15,11 @@ def auth_h(token):
 
 
 def _login_new(sess, name="TEST User"):
-    phone = f"+9198{uuid.uuid4().hex[:8]}"
-    r = sess.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": "123456", "name": name})
+    phone = f"+9198{uuid.uuid4().int % 10**8:08d}"
+    rs = sess.post(f"{API}/auth/otp/send", json={"phone": phone})
+    assert rs.status_code == 200, rs.text
+    code = rs.json()["dev_code"]
+    r = sess.post(f"{API}/auth/otp/verify", json={"phone": phone, "code": code, "name": name})
     assert r.status_code == 200, r.text
     d = r.json()
     return {"token": d["session_token"], "user": d["user"], "phone": phone}
@@ -26,7 +29,7 @@ def _book_and_pay(sess, token, vehicle_id="veh_demo_car_01", travel_date=None, s
     if travel_date is None:
         travel_date = (date.today() + timedelta(days=30 + int(uuid.uuid4().int % 100))).isoformat()
     if seats is None:
-        seats = [(int(uuid.uuid4().int) % 900) + 100]
+        seats = [(int(uuid.uuid4().int) % 4) + 1]
     r = sess.post(
         f"{API}/bookings",
         json={"vehicle_id": vehicle_id, "travel_date": travel_date, "seat_numbers": seats},
@@ -224,21 +227,25 @@ class TestRazorpayFallback:
     def test_pay_razorpay_falls_back_to_mock_when_disabled(self, s):
         """With RAZORPAY_KEY_ID/SECRET blank, method='razorpay' should fall through to mock fulfilment."""
         u = _login_new(s, "TEST RzpFallback")
-        travel_date = (date.today() + timedelta(days=60)).isoformat()
+        # Use a fresh future date each run to avoid seat collisions across suite reruns
+        travel_date = (date.today() + timedelta(days=60 + int(uuid.uuid4().int) % 3000)).isoformat()
         seat = (int(uuid.uuid4().int) % 28) + 1  # bus has 32 seats
         r = s.post(
             f"{API}/bookings",
             json={"vehicle_id": "veh_demo_bus_01", "travel_date": travel_date, "seat_numbers": [seat]},
             headers=auth_h(u["token"]),
         )
-        # If unlucky collision, retry once with another seat
-        if r.status_code == 409:
-            seat2 = (seat % 32) + 1
+        # Retry with a new date+seat combo on collision (bounded)
+        tries = 0
+        while r.status_code == 409 and tries < 5:
+            travel_date = (date.today() + timedelta(days=60 + int(uuid.uuid4().int) % 3000)).isoformat()
+            seat = (int(uuid.uuid4().int) % 28) + 1
             r = s.post(
                 f"{API}/bookings",
-                json={"vehicle_id": "veh_demo_bus_01", "travel_date": travel_date, "seat_numbers": [seat2]},
+                json={"vehicle_id": "veh_demo_bus_01", "travel_date": travel_date, "seat_numbers": [seat]},
                 headers=auth_h(u["token"]),
             )
+            tries += 1
         assert r.status_code == 200, r.text
         bid = r.json()["booking_id"]
         rp = s.post(f"{API}/bookings/{bid}/pay", json={"method": "razorpay"}, headers=auth_h(u["token"]))

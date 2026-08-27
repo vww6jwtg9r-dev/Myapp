@@ -1,0 +1,43 @@
+{
+  "summary": "Backend security-fix retest. Added /app/backend/tests/test_security_fixes.py (19 tests covering SEC-001..SEC-005 and booking input validation) plus a shared /app/backend/tests/conftest.py helper. Migrated all pre-existing fixtures (backend_test.py, test_new_features.py, test_v3_features.py) off the removed hardcoded OTP '123456' and onto dynamic /otp/send + dev_code. Full suite (backend_test.py + test_new_features.py + test_v3_features.py + test_security_fixes.py) now: 74/74 PASSED in ~16s, twice back-to-back. All 5 security findings verified closed: SEC-001 real bcrypt-hashed random OTP, single-use, 5-attempt lock (429), 5-sends/hour rate-limit (429), admin phone blocked with 403 'Admin accounts must sign in with Google'; SEC-002 stranger GET /bookings/{id} → 404 while passenger and vehicle-owning driver get 200; SEC-003 gpay/phonepe/upi mock succeeds only while PAYMENT_MOCK_ALLOWED=true; cancel after departure time returns 400; SEC-004 negative and zero withdraw amounts return 422 via Pydantic gt=0, and two concurrent withdraws of the whole balance yield exactly one 200 + one 400 with balance never negative (find_one_and_update atomic decrement verified); SEC-005 upload with Content-Type='text/html' still gets stored as image/jpeg (extension-forced MIME), 6MB upload returns 413, GET /api/files/{path} returns X-Content-Type-Options: nosniff and Content-Type image/*. Booking input validation: duplicate seats, out-of-range seats, past dates, and non-YYYY-MM-DD formats all return 400. Also verified the old static '123456' code is now rejected (401).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_security_fixes.py",
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/tests/test_new_features.py",
+    "/app/backend/tests/test_v3_features.py",
+    "/app/test_reports/pytest/pytest_all.xml",
+    "/app/test_reports/pytest/pytest_security.xml"
+  ],
+  "action_items": [
+    "No security regressions. All 5 SEC findings verified closed with 19 dedicated tests.",
+    "Optional hardening: /auth/otp/send responds 200 for admin phones as well (anti-enumeration is good), but consider adding a Retry-After header on 429 responses so clients can back off gracefully.",
+    "Optional: PAYMENT_MOCK_ALLOWED toggle is read at module import; there is no runtime endpoint that reflects it. Consider exposing it in /api/config (currently only razorpay_enabled) so the frontend can hide gpay/phonepe/upi buttons in production.",
+    "Optional: /api/upload force-maps MIME by file extension but does not sniff magic bytes; a determined attacker with .jpg extension + arbitrary bytes could still upload non-images. Add a light Pillow validate step in future if abuse surfaces (not in current scope)."
+  ],
+  "critical_code_review_comments": [
+    "server.py:322-330 bcrypt hashing at rounds=8 — deliberately low for OTP (fast verify, adequate for a 6-digit secret with 5-attempt cap). OK.",
+    "server.py:333-358 OTP send stores hash + expires_at (5 min) + attempts=0 + consumed=False + created_at; rate-limit window uses count over the last OTP_SEND_WINDOW_SECONDS. Matches spec.",
+    "server.py:361-397 verify path enforces admin block BEFORE reading OTP doc; checks expiry, per-code attempt cap (marks consumed on 5 wrong), then bcrypt compare. Single-use via consumed flag on success — verified via test_correct_code_once_then_single_use.",
+    "server.py:704-705 mock payment gate: if not RAZORPAY_ENABLED and not PAYMENT_MOCK_ALLOWED → 503. Note the current .env keeps PAYMENT_MOCK_ALLOWED=true which is correct for preview.",
+    "server.py:803-813 cancel-after-departure computes departure in UTC using v.departure_time HH:MM; caveat — uses UTC not IST, so an IST driver at 09:00 IST is still allowed to cancel up to ~09:00 UTC (14:30 IST). Acceptable for MVP; flag if strict IST enforcement needed later.",
+    "server.py:841-860 wallet/withdraw uses find_one_and_update with a compound filter {wallet_balance: {$gte: amount}} — proper atomic conditional decrement; verified via concurrent test (only 1 of 2 succeeds).",
+    "server.py:425-449 upload endpoint force-maps content_type by ext; ignores client Content-Type. Also sets X-Content-Type-Options: nosniff on read.",
+    "server.py:452-470 /files/{path:path} — returns image/* only for whitelisted MIMEs; unknown falls back to application/octet-stream. WebView-safe."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_security_fixes.py (new — 19 tests: SEC-001..SEC-005 + booking validation)",
+    "/app/backend/tests/conftest.py (new — shared otp_login helper w/ rate-limit auto-clear + demo_driver_token fixture)",
+    "/app/backend/tests/backend_test.py (migrated fixtures from hardcoded 123456 → dynamic dev_code; used demo_driver_token fixture; used digit-only random phone; fixed seat range 1..4 for car)",
+    "/app/backend/tests/test_new_features.py (migrated _login_new to dev_code; digit-only random phone; tightened seat range; made razorpay-fallback test date-fresh)",
+    "/app/backend/tests/test_v3_features.py (migrated _login_new to dev_code; digit-only random phone; tightened seat range to 1..4)"
+  ],
+  "success_rate": {"backend": "100% (74/74 twice back-to-back)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Test admin (+911111111111) is upserted with is_admin=true to verify OTP-block for admins. Regular test users use fresh randomly-generated phones per test. No persistent seed pollution; existing seeded veh_demo_car_01/tempo_01/bus_01 + user_demo_driver are reused.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All 5 security findings are closed. Test fixtures now use /otp/send → dev_code. /app/backend/tests/conftest.py exports otp_login(sess, phone, name) which auto-clears rate-limit window before send (needed because OTP send is limited to 5/hr per phone; tests reusing fixed phones would otherwise flake). demo_driver_token session fixture logs in +919000000001 once. Public API: https://mobility-reserve-3.preview.emergentagent.com/api. .env has OTP_DEV_MODE=true and PAYMENT_MOCK_ALLOWED=true — both must be false in production (documented in /app/memory/test_credentials.md).",
+  "rca_of_issue": "N/A — no bugs discovered. Initial rerun flakiness was due to (a) fixture phones built from uuid.hex[:8] which _normalize_phone stripped to <8 digits → 400 'Invalid phone', fixed to digit-only random suffixes; (b) fixed phones hitting the new 5/hr rate limit, fixed by clearing db.otp_codes.{phone} at start of tests + conftest helper doing the same; (c) pre-existing seat-range bugs in helpers picking seats outside vehicle capacity (car=4, tempo=12), fixed to safe 1..4 range; (d) demo-driver phone rate-limited by repeated logins across tests, fixed via session-scoped demo_driver_token fixture."
+}
